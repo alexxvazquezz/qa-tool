@@ -1,0 +1,26 @@
+[[rule]]
+name = "payments_500"
+description = "Session creation returns HTTP 500"
+endpoint = "/customer/checkout/v1/payments"
+action = "respond"
+method = "POST"
+status = 500
+body = "{\"error\": \"Internal Server Error\"}"
+
+[[rule]]
+name = "install_server_error"
+description = "Session creation returns HTTP 500"
+endpoint = "/customer/v1/traveller/esims/{uuid}"
+action = "respond"
+method = "GET"
+status = 401
+body = "{\"error\": \"Internal Server Error\"}"
+
+[[rule]]
+name = "esim_qr_kill"
+description = "Drop QR fetch connection"
+endpoint = "/customer/v1/traveller/esims/{uuid}/qr"
+action = "kill"
+method = "GET"
+status = 500
+body = ""

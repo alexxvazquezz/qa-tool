@@ -1,0 +1,1 @@
+"""Command layer — thin wrappers that parse CLI args and call services."""
