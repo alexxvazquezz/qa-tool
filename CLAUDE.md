@@ -4,7 +4,7 @@ You are working on a Python CLI + TUI tool for QA engineers at Holafly. It autom
 
 ## Project Location
 
-`/home/king/Code/qa_tool/`
+`qa_tool/`
 
 ## What's Built (Working End-to-End)
 
