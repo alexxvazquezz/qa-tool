@@ -233,15 +233,13 @@ def start_injection(rule_name: str) -> InjectionRule:
     SCRIPT_FILE.parent.mkdir(parents=True, exist_ok=True)
     SCRIPT_FILE.write_text(script_source)
 
-    # Stop any running mitmweb so we can restart with the script
+    # Record active state BEFORE restarting so auto-detection picks it up
+    ACTIVE_STATE_FILE.write_text(rule_name)
+
+    # Restart mitmweb — auto-detects injection + throttle scripts from state files
     if is_mitmweb_running():
         stop_mitmweb()
-
-    # Start mitmweb with the script loaded
-    start_mitmweb(script=SCRIPT_FILE)
-
-    # Record what's active
-    ACTIVE_STATE_FILE.write_text(rule_name)
+    start_mitmweb()
 
     return match
 
@@ -260,11 +258,12 @@ def stop_injection() -> str | None:
     if ACTIVE_STATE_FILE.exists():
         active_name = ACTIVE_STATE_FILE.read_text().strip() or None
         ACTIVE_STATE_FILE.unlink()
+        SCRIPT_FILE.unlink(missing_ok=True)
 
-    # Restart mitmweb without the script
+    # Restart mitmweb — auto-detects remaining active scripts (e.g. throttle)
     if is_mitmweb_running():
         stop_mitmweb()
-        start_mitmweb()  # No script argument this time
+        start_mitmweb()
 
     return active_name
 

@@ -16,11 +16,26 @@ from holafly_qa.services.process import (
 MITMWEB_PID_NAME = "mitmweb"
 LOG_FILE = Path.home() / ".holafly-qa" / "mitmweb.log"
 
+_STATE_DIR = Path.home() / ".holafly-qa"
+_INJECTION_STATE_FILE = _STATE_DIR / "active_injection.txt"
+_INJECTION_SCRIPT_FILE = _STATE_DIR / "current_injection.py"
+_THROTTLE_STATE_FILE = _STATE_DIR / "active_throttle.txt"
+_THROTTLE_SCRIPT_FILE = _STATE_DIR / "current_throttle.py"
+
+
+def _collect_addon_scripts() -> list[Path]:
+    """Return paths of active mitmproxy addon scripts based on state files."""
+    scripts: list[Path] = []
+    if _INJECTION_STATE_FILE.exists() and _INJECTION_SCRIPT_FILE.exists():
+        scripts.append(_INJECTION_SCRIPT_FILE)
+    if _THROTTLE_STATE_FILE.exists() and _THROTTLE_SCRIPT_FILE.exists():
+        scripts.append(_THROTTLE_SCRIPT_FILE)
+    return scripts
+
 
 def start_mitmweb(
     port: int = 8080,
     ignore_hosts: str = ".*adyen.*",
-    script: Path | None = None,
 ) -> int:
     """Start mitmweb in the background with the right flags.
 
@@ -29,12 +44,13 @@ def start_mitmweb(
     file so users can debug if something goes wrong. Records the PID
     so a later 'stop' command can find and kill it.
 
+    Active addon scripts (injection rules, throttle) are detected
+    automatically from state files — callers do not need to pass them.
+
     Args:
         port: Port for mitmproxy to listen on.
         ignore_hosts: Regex of hosts to pass through without TLS
             interception (default bypasses Adyen to avoid pinning).
-        script: Optional path to a mitmproxy addon script for
-            failure injection.
 
     Returns:
         The PID of the spawned mitmweb process.
@@ -60,7 +76,7 @@ def start_mitmweb(
         "--set",
         f"ignore_hosts={ignore_hosts}",
     ]
-    if script is not None:
+    for script in _collect_addon_scripts():
         cmd.extend(["-s", str(script)])
 
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
