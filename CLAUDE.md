@@ -24,9 +24,11 @@ GUI features:
 - Status log showing timestamped action output
 - PROXY ON / NO PROXY toggle for emulator (cyan when on, yellow when off)
 - APK button toggles INSTALL ↔ UNINSTALL based on device state
+- APK version label below APK row — shows installed `versionName` from device + available APK filename
 - CERT and APK status checks query the running emulator via adb (not just local file existence)
 - Injection rule rows toggle START ↔ STOP with green active marker
 - APK picker modal for multi-APK selection (Textual ModalScreen + ListView)
+- Throttle preset row with clickable buttons (FULL, LTE, HSDPA, UMTS, EDGE, GSM) — cyan = active
 - All long-running actions use `@work(thread=True)` so UI never freezes
 
 ## Full Directory Structure
@@ -48,20 +50,21 @@ GUI features:
 │       │   ├── config.py             # Config dataclass, load/save ~/.holafly-qa/config.toml
 │       │   ├── process.py            # PID file helpers, is_process_running (signal 0)
 │       │   ├── avd.py                # list_avds via subprocess
-│       │   ├── mitmweb.py            # start/stop/is_running (ignore_hosts=".adyen.")
+│       │   ├── mitmweb.py            # start/stop/is_running, _collect_addon_scripts (injection + throttle)
 │       │   ├── emulator.py           # start/stop/wait_for_boot/wipe_app/wipe_data
 │       │   ├── cert.py               # install_cert orchestrator, CertError
 │       │   ├── apk.py                # find_apks, pick_apk, install_apk, uninstall_app, ApkError
-│       │   └── injection.py          # InjectionRule, glob_to_regex, load/save rules, render_script, start/stop injection
+│       │   ├── injection.py          # InjectionRule, glob_to_regex, load/save rules, render_script, start/stop injection, add_rule, remove_rule, get_rule
+│       │   └── throttle.py           # THROTTLE_PRESETS, render_throttle_script, get_active_throttle, set_throttle, clear_throttle
 │       ├── commands/                  # THIN CLI WRAPPERS — parse args, call services, print output
 │       │   ├── init.py
 │       │   ├── doctor_cmd.py
 │       │   ├── init_cmd.py
-│       │   ├── mitmweb_cmd.py
+│       │   ├── mitmweb_cmd.py         # start, stop, throttle subcommands
 │       │   ├── emulator_cmd.py
 │       │   ├── cert_cmd.py
 │       │   ├── apk_cmd.py
-│       │   ├── inject_cmd.py
+│       │   ├── inject_cmd.py          # list, start, stop, status, add (wizard), remove
 │       │   └── gui_cmd.py
 │       └── gui/
 │           ├── init.py
@@ -88,6 +91,8 @@ When adding a new feature: write the service function FIRST, then add the CLI wr
 | `~/.holafly-qa/emulator.pid` | Tracks running emulator PID | Never edited |
 | `~/.holafly-qa/active_injection.txt` | Currently active rule name | Never edited |
 | `~/.holafly-qa/current_injection.py` | Auto-generated mitmproxy addon script | Never edited |
+| `~/.holafly-qa/active_throttle.txt` | Currently active throttle preset name | Never edited |
+| `~/.holafly-qa/current_throttle.py` | Auto-generated mitmproxy throttle addon script | Never edited |
 | `~/.holafly-qa/mitmweb.log` | mitmweb stdout/stderr | Debug only |
 | `~/.holafly-qa/emulator.log` | emulator stdout/stderr | Debug only |
 | `~/.holafly-qa/cert_hash.txt` | Cached cert subject hash | Never edited |
@@ -169,6 +174,21 @@ RULES_FILE = _PROJECT_ROOT / "rules" / "injection_rules.toml"
 
 Uses `__file__`-based resolution. Works in dev mode (editable install). Will break for remote pipx installs — flagged as known distribution issue, not yet addressed.
 
+## Throttle System
+
+### How Throttle Activation Works
+
+1. User runs `qa-tool mitmweb throttle <preset>` or clicks a preset button in the GUI
+2. `set_throttle(preset)` in `services/throttle.py` generates a mitmproxy addon Python script
+3. Script is written to `~/.holafly-qa/current_throttle.py`
+4. Preset name is written to `~/.holafly-qa/active_throttle.txt`
+5. If mitmweb is running, it is stopped and restarted (picks up the new script via `_collect_addon_scripts()`)
+6. `clear_throttle()` / preset `"full"` deletes both state files and restarts mitmweb
+
+### Multi-Script mitmweb
+
+`_collect_addon_scripts()` in `services/mitmweb.py` checks both state files and returns all active script paths. `start_mitmweb()` passes each as a separate `-s <path>` argument. Injection and throttle can run simultaneously with no conflicts.
+
 ## Config Dataclass
 
 ```python
@@ -207,6 +227,7 @@ These came from hours of debugging. Do not re-discover them.
 - **Path resolved via `__file__`:** same pattern as rules folder
 - **Multi-APK handling:** if 1 APK exists, auto-install. If multiple, show picker (questionary for CLI, Textual ModalScreen for GUI). If 0, error.
 - **APK state check in GUI:** queries `adb shell pm list packages <name>` to determine if app is installed on device
+- **APK version label:** `_get_installed_version()` in `app.py` runs `adb shell dumpsys package <pkg>` and parses `versionName=` line. `get_apk_display_info()` combines this with the available APK filename for the label below the APK row.
 - **Default package name:** `com.holafly.holafly.dev`
 
 ### Process Management
@@ -220,7 +241,8 @@ These came from hours of debugging. Do not re-discover them.
 - **Workers use `@work(thread=True, exclusive=True)`** for all service calls. Never call blocking service functions on the main thread.
 - **`self.call_from_thread(self.add_log, "message")` from workers** — thread-safe way to update UI from background threads.
 - **`self.call_from_thread(self.refresh_all)` after every worker** to update all row colors/states.
-- **Button IDs follow a convention:** `btn-{system_id}-{primary|secondary|tertiary}` for system rows, `rule-btn-{rule_name}` for rule rows, `btn-proxy-toggle` for the proxy toggle, `btn-apk-primary` for APK install/uninstall.
+- **Button IDs follow a convention:** `btn-{system_id}-{primary|secondary|tertiary}` for system rows, `rule-btn-{rule_name}` for rule rows, `btn-proxy-toggle` for the proxy toggle, `btn-apk-primary` for APK install/uninstall, `btn-throttle-{preset}` for throttle preset buttons.
+- **`#apk-version-label`** is a `Label` below the APK SystemRow, updated in `refresh_all()` via `get_apk_display_info()`. Shows installed versionName + available APK filename.
 
 ## Dependencies
 
@@ -282,36 +304,25 @@ Both CLI and GUI must call this same service function.
 
 On Save: call `quick_add_rule()`, dismiss modal, refresh rules list so the new rule appears immediately. Match the neon arcade aesthetic (cyan borders, magenta buttons, yellow titles).
 
-### Task 2: Network Speed Throttling
+### Task 2: Network Speed Throttling ✓ DONE
 
-**Problem:** QA needs to test app behavior on slow network connections (loading states, timeouts, retry logic).
+**Implemented via mitmproxy addon scripts** (not `-netspeed` emulator flag — that approach was abandoned because it requires an emulator restart to change).
 
-**Technique:** Use the Android emulator's built-in `-netspeed <preset>` flag. This throttles ALL traffic at the QEMU level.
+**How it works:** `services/throttle.py` generates a mitmproxy addon script that delays each response by base latency + body-size/bandwidth. The script is written to `~/.holafly-qa/current_throttle.py`. mitmweb auto-detects and loads it on start via `_collect_addon_scripts()` in `services/mitmweb.py`.
 
-Available presets:
-- `full` — no throttling (default)
-- `lte` — ~58 Mbps
-- `hsdpa` — ~14 Mbps
-- `umts` — ~1.9 Mbps (3G)
-- `edge` — ~118 Kbps
-- `gsm` — ~14.4 Kbps
+**CLI:** `qa-tool mitmweb throttle <preset>` — restarts mitmweb with the new script if it's running, or saves the setting for the next start.
 
-**Important constraint:** `-netspeed` can ONLY be set at emulator launch. Cannot be changed at runtime. Changing requires restarting the emulator. The UI must make this clear.
+**GUI:** Throttle row with preset buttons (FULL, LTE, HSDPA, UMTS, EDGE, GSM). Active preset is cyan, others are dark gray. Handled in `refresh_throttle_buttons()` and `worker_set_throttle()`.
 
-**Changes needed:**
+**Presets defined in `THROTTLE_PRESETS`:**
+- `full` — no throttling (None, clears the script)
+- `lte` — 58,000 kbps / 50ms latency
+- `hsdpa` — 14,400 kbps / 100ms latency
+- `umts` — 1,920 kbps / 200ms latency (3G)
+- `edge` — 118 kbps / 400ms latency
+- `gsm` — 9.6 kbps / 750ms latency
 
-1. **Service layer** (`services/emulator.py`): Add `netspeed: str = "full"` parameter to both `start_emulator()` and `wipe_emulator_data()`. When not `"full"`, append `-netspeed <value>` to the emulator command list.
-
-2. **CLI** (`commands/emulator_cmd.py`): Add `--netspeed` option to `qa-tool emulator start`:
-```python
-   netspeed: str = typer.Option("full", "--netspeed", help="Network speed: full, lte, hsdpa, umts, edge, gsm")
-```
-
-3. **GUI** (`gui/app.py`): Add a Textual `Select` dropdown or clickable label in the EMULATOR row area showing current netspeed selection. Options: FULL, LTE, HSDPA, UMTS, EDGE, GSM. Selection updates `self.netspeed` on the app instance. Pass `self.netspeed` to `start_emulator()` and `wipe_emulator_data()` in their workers.
-
-4. **Visual indicator:** When netspeed is not `full`, show it clearly in the GUI — e.g. yellow label `[UMTS]` next to the emulator status pill so the user knows throttling is active.
-
-5. **Default:** Always `full`. Resets to `full` on every GUI launch (same pattern as the proxy toggle).
+**Throttle + injection coexist:** Both scripts can be active simultaneously. `_collect_addon_scripts()` returns both if both state files exist; mitmweb loads each with a separate `-s` flag.
 
 ### Task 3 (Optional): Auto-Refresh in GUI
 

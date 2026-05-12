@@ -30,6 +30,12 @@ from holafly_qa.services.mitmweb import (
     start_mitmweb,
     stop_mitmweb,
 )
+from holafly_qa.services.throttle import (
+    THROTTLE_PRESETS,
+    clear_throttle,
+    get_active_throttle,
+    set_throttle,
+)
 
 
 HOLAFLY_PACKAGE = "com.holafly.holafly.dev"
@@ -114,6 +120,43 @@ def get_apk_state() -> str:
     if _is_apk_on_device():
         return "INSTALLED"
     return "NOT INSTALLED"
+
+
+def _get_installed_version() -> str | None:
+    """Query the installed app versionName from adb."""
+    try:
+        result = subprocess.run(
+            ["adb", "shell", "dumpsys", "package", HOLAFLY_PACKAGE],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    for line in result.stdout.splitlines():
+        if "versionName=" in line:
+            return line.strip().split("versionName=", 1)[1].split()[0]
+    return None
+
+
+def get_apk_display_info() -> str:
+    """Return a version/filename string for display below the APK row."""
+    apks = find_apks_in_dir()
+
+    if is_emulator_running() and _is_apk_on_device():
+        version = _get_installed_version()
+        installed = f"installed: v{version}" if version else "installed"
+        file_part = f"  |  file: {apks[-1].name}" if apks else ""
+        return installed + file_part
+    elif apks:
+        if len(apks) == 1:
+            return f"file: {apks[0].name}"
+        return f"{len(apks)} APKs in apks/"
+    return "(no APKs in apks/ folder)"
 
 
 class SystemRow(Horizontal):
@@ -412,6 +455,26 @@ class HolaflyQAApp(App):
         color: #0a0a0a;
         text-style: bold;
     }
+
+    .throttle-row {
+        height: 3;
+        align: left middle;
+        padding: 0 1;
+    }
+
+    .throttle-btn {
+        background: #1a1a1a;
+        color: #444444;
+        border: none;
+        margin: 0 0;
+        min-width: 7;
+        height: 1;
+    }
+
+    .throttle-btn:hover {
+        background: #333333;
+        color: #cccccc;
+    }
     #log-section {
         height: 14;
     }
@@ -426,6 +489,11 @@ class HolaflyQAApp(App):
         padding: 0 1;
         color: #ff00ff;
         text-style: bold;
+    }
+    #apk-version-label {
+        color: #666666;
+        padding: 0 4;
+        height: 1;
     }
     """
 
@@ -448,6 +516,15 @@ class HolaflyQAApp(App):
                 yield SystemRow(
                     "mitmweb", "MITMWEB", get_mitmweb_state, "START", "STOP"
                 )
+                with Horizontal(id="throttle-row", classes="throttle-row"):
+                    yield Label("●", classes="indicator", id="ind-throttle")
+                    yield Label(f"{'THROTTLE':<10}", classes="system-name")
+                    for _preset in THROTTLE_PRESETS:
+                        yield Button(
+                            _preset.upper(),
+                            id=f"btn-throttle-{_preset}",
+                            classes="throttle-btn",
+                        )
                 with Horizontal(classes="system-row-with-toggle"):
                     yield SystemRow(
                         "emulator",
@@ -468,6 +545,7 @@ class HolaflyQAApp(App):
                 yield SystemRow(
                     "apk", "APK", get_apk_state, "INSTALL"
                 )
+                yield Label("", id="apk-version-label")
 
             with Container(classes="section", id="rules-section"):
                 yield Label("◆ INJECTION RULES ◆", classes="section-title")
@@ -514,6 +592,37 @@ class HolaflyQAApp(App):
         except Exception:
             pass
 
+        try:
+            version_label = self.query_one("#apk-version-label", Label)
+            version_label.update(get_apk_display_info())
+        except Exception:
+            pass
+
+        self.refresh_throttle_buttons()
+
+    def refresh_throttle_buttons(self) -> None:
+        """Update throttle button colours and indicator to reflect active preset."""
+        active = get_active_throttle()  # None means full (no throttle)
+        active_preset = active or "full"
+
+        for preset in THROTTLE_PRESETS:
+            try:
+                btn = self.query_one(f"#btn-throttle-{preset}", Button)
+                if preset == active_preset:
+                    btn.styles.background = "#00ffff"
+                    btn.styles.color = "#0a0a0a"
+                else:
+                    btn.styles.background = "#1a1a1a"
+                    btn.styles.color = "#444444"
+            except Exception:
+                pass
+
+        try:
+            ind = self.query_one("#ind-throttle", Label)
+            ind.styles.color = "#ffff00" if active else "#666666"
+        except Exception:
+            pass
+
     def add_log(self, message: str) -> None:
         """Append a line to the status log and re-render."""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -537,6 +646,29 @@ class HolaflyQAApp(App):
             btn.add_class("proxy-toggle-off")
             self.add_log("Proxy mode: OFF")
 
+    @work(thread=True, exclusive=True)
+    def worker_set_throttle(self, preset: str) -> None:
+        if preset == "full":
+            previous = get_active_throttle()
+            self.call_from_thread(self.add_log, "Clearing throttle...")
+            try:
+                clear_throttle()
+                msg = f"✓ Throttle cleared (was {previous})" if previous else "✓ No throttle active"
+                self.call_from_thread(self.add_log, msg)
+            except Exception as e:
+                self.call_from_thread(self.add_log, f"✗ Throttle clear failed: {e}")
+        else:
+            params = THROTTLE_PRESETS.get(preset)
+            label = params["label"] if params else preset  # type: ignore[index]
+            self.call_from_thread(self.add_log, f"Setting throttle: {label}...")
+            try:
+                set_throttle(preset)
+                self.call_from_thread(self.add_log, f"✓ Throttle active: {label}")
+            except Exception as e:
+                self.call_from_thread(self.add_log, f"✗ Throttle failed: {e}")
+        self.call_from_thread(self.refresh_throttle_buttons)
+        self.call_from_thread(self.refresh_all)
+
     def action_refresh(self) -> None:
         self.refresh_all()
         self.add_log("Status refreshed")
@@ -546,6 +678,10 @@ class HolaflyQAApp(App):
 
         if button_id == "btn-proxy-toggle":
             self._toggle_proxy()
+            return
+        if button_id and button_id.startswith("btn-throttle-"):
+            preset = button_id.removeprefix("btn-throttle-")
+            self.worker_set_throttle(preset)
             return
         if button_id == "btn-mitmweb-primary":
             self.worker_mitmweb_start()

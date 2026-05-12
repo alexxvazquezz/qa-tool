@@ -1,4 +1,4 @@
-"""mitmweb commands — start and stop mitmproxy in the background."""
+"""mitmweb commands — start, stop, and throttle mitmproxy in the background."""
 
 import typer
 
@@ -10,6 +10,12 @@ from holafly_qa.services.mitmweb import (
     stop_mitmweb,
 )
 from holafly_qa.services.process import load_pid
+from holafly_qa.services.throttle import (
+    THROTTLE_PRESETS,
+    clear_throttle,
+    get_active_throttle,
+    set_throttle,
+)
 
 mitmweb_app = typer.Typer(
     name="mitmweb",
@@ -59,6 +65,14 @@ def start(
     typer.echo(f"  PID:    {pid}")
     typer.echo(f"  Proxy:  127.0.0.1:{effective_port}")
     typer.echo(f"  Web UI: http://127.0.0.1:8081")
+    active_throttle = get_active_throttle()
+    if active_throttle:
+        params = THROTTLE_PRESETS[active_throttle]
+        label = params["label"] if params else active_throttle  # type: ignore[index]
+        typer.echo(
+            f"  Throttle: "
+            + typer.style(label, fg=typer.colors.YELLOW, bold=True)
+        )
     typer.echo(f"  Log:    {LOG_FILE}")
 
 
@@ -86,3 +100,71 @@ def stop() -> None:
                 fg=typer.colors.YELLOW,
             )
         )
+
+
+@mitmweb_app.command("throttle")
+def throttle(
+    preset: str = typer.Argument(
+        help="Speed preset: full (disable), lte, hsdpa, umts, edge, gsm",
+    ),
+) -> None:
+    """Set network throttle on mitmproxy. Use 'full' to disable.
+
+    When mitmweb is running it will be restarted automatically with
+    the new throttle setting. If mitmweb is stopped, the setting is
+    saved and applied on the next 'mitmweb start'.
+
+    Available presets:
+      full   — no throttle (disable)
+      lte    — ~58 Mbps / 50ms latency
+      hsdpa  — ~14.4 Mbps / 100ms latency
+      umts   — ~1.9 Mbps / 200ms latency  (3G)
+      edge   — ~118 Kbps / 400ms latency
+      gsm    — ~9.6 Kbps / 750ms latency
+    """
+    if preset not in THROTTLE_PRESETS:
+        valid = ", ".join(THROTTLE_PRESETS.keys())
+        typer.echo(
+            typer.style(
+                f"✗ Unknown preset {preset!r}. Valid: {valid}",
+                fg=typer.colors.RED,
+            )
+        )
+        raise typer.Exit(code=1)
+
+    running = is_mitmweb_running()
+
+    try:
+        if preset == "full":
+            previous = clear_throttle()
+            if previous:
+                typer.echo(
+                    typer.style(
+                        f"✓ Throttle cleared (was {previous})",
+                        fg=typer.colors.GREEN,
+                        bold=True,
+                    )
+                )
+            else:
+                typer.echo(
+                    typer.style("✓ No throttle was active", fg=typer.colors.GREEN)
+                )
+        else:
+            set_throttle(preset)
+            params = THROTTLE_PRESETS[preset]
+            label = params["label"]  # type: ignore[index]
+            typer.echo(
+                typer.style(
+                    f"✓ Throttle set to {label}",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+            )
+    except ValueError as e:
+        typer.echo(typer.style(f"✗ {e}", fg=typer.colors.RED))
+        raise typer.Exit(code=1)
+
+    if running:
+        typer.echo("  mitmweb restarted with updated throttle")
+    else:
+        typer.echo("  mitmweb is not running — setting saved for next start")
