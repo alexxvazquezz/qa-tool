@@ -32,6 +32,70 @@ GUI features:
 - Throttle preset row with clickable buttons (FULL, LTE, HSDPA, UMTS, EDGE, GSM) — cyan = active
 - All long-running actions use `@work(thread=True)` so UI never freezes
 
+## Agent Runbook — Installing a Build
+
+Follow this when asked to install an `.apk`/`.aab` (e.g. "install the new build", "put the RC on my phone"). Use the CLI, not the GUI (the GUI is interactive and always targets the emulator). If the venv isn't active, run `source venv/bin/activate` from the project root first.
+
+### 1. Preflight (run these, read the output)
+
+```bash
+adb devices                                   # need ≥1 device in state "device"
+ls apks/                                      # which builds are available
+```
+
+For an `.aab`, also check:
+
+```bash
+bundletool version || ls tools/bundletool.jar # one of these must work
+java -version                                 # Java 11+ (needed by the jar)
+ls ~/.android/debug.keystore                  # signing key
+```
+
+- **No device listed** → start the emulator with `qa-tool emulator start` (it blocks until boot, ~20-60s; use a 300s timeout). For a phone, ask the user to plug it in and accept the USB debugging prompt. You cannot do this for them.
+- **Device shows `unauthorized`** → ask the user to unlock the phone and tap Allow.
+- **Keystore missing** → safe to create it yourself. It's a local debug key, not a secret:
+  `mkdir -p ~/.android && keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"`
+- **bundletool missing** → tell the user. Don't download binaries on your own. Install options are in README → Prerequisites.
+
+### 2. Pick the target and file, then install
+
+The CLI prompts interactively (questionary) when there are multiple files or devices, which an agent can't answer. **Always pass both `--path` and, if more than one device is connected, `-s`:**
+
+```bash
+qa-tool apk install --path apks/<file> -s <serial>   # e.g. -s emulator-5554
+```
+
+- Files ending in `.aab` take ~5-60s (bundletool build + install). Use a 300s+ timeout.
+- The CLI uninstalls the existing app first by default. The package is read from the file. Staging `.apk` → `com.holafly.holafly.dev`, RC `.aab` → `com.holafly.holafly`.
+- If the user says "latest" without naming a file, pick the newest by build number/date in the filename and say which one you chose.
+
+### 3. Verify
+
+```bash
+adb -s <serial> shell pm list packages com.holafly
+adb -s <serial> shell dumpsys package <package> | grep -m1 versionName
+```
+
+Report the package, versionName and device. Don't just echo `✓ Installed`.
+
+### 4. Before touching a real phone
+
+- **Warn the user before installing an RC `.aab` on a phone** that may have the Play Store Holafly app: uninstall-first removes that app's login/data. Get confirmation first. Uninstalling is outward-facing and not reversible.
+- **Real phones get no interception.** Injection/throttle/cert only apply to the emulator.
+
+### 5. Errors → actions
+
+| Output contains | Action |
+|-----------------|--------|
+| `No device connected.` | Step 1. |
+| `Device '<x>' is not connected.` | Re-run with a serial from the printed `Connected:` list. |
+| `bundletool not found` / `java not found` | Tell the user. See README Prerequisites. |
+| `Debug keystore not found` | Create it (step 1), retry. |
+| `different signature. Uninstall it first` | `--keep` was used. Re-run without it. On a phone, confirm with the user first. |
+| `bundletool build-apks failed: ...` | Read the message. It's usually a corrupt or partial download: `unzip -l <file>.aab` should list `BundleConfig.pb`. |
+
+Note: an `.aab` *is* a zip file, so file managers show it as one. Never unzip it before installing.
+
 ## Full Directory Structure
 
 /home/king/Code/qa_tool/
@@ -281,7 +345,6 @@ These were explicitly scoped out by the user:
 - **Cert uninstall** — users wipe the emulator instead. Too much code for marginal value.
 - **API 34+ APEX conscrypt support** — not needed based on current testing.
 - **Unit tests** — user explicitly declined. Manual end-to-end testing is the workflow.
-- **Git integration** — no repo set up yet. User will add when company repo is available.
 - **Doctor check for bundletool/java** — deliberately omitted so APK-only users don't see a red doctor.
 - **Serial support for non-install adb calls** — cert, emulator, and GUI status checks still assume a single device.
 
