@@ -60,14 +60,33 @@ On Ubuntu: `sudo apt install openssl`
 
 ### bundletool (only needed for .aab builds)
 
-`adb` can't install an Android App Bundle (`.aab`) directly. The tool uses Google's [bundletool](https://github.com/google/bundletool) to convert it into device-specific APKs. Install it one of two ways:
+`adb` can't install an Android App Bundle (`.aab`) directly. The tool uses Google's [bundletool](https://github.com/google/bundletool) to convert it into device-specific APKs. bundletool is a Java program, so you need **Java 11+** on `PATH` (check with `java -version`; Android Studio's bundled `jbr/` works, or `sudo apt install openjdk-17-jre` on Ubuntu).
+
+Install bundletool one of three ways:
+
+**Option A — macOS (Homebrew):**
 
 ```bash
-# Option A: Homebrew
 brew install bundletool
 ```
 
-Option B: download `bundletool-all-<ver>.jar` from [github.com/google/bundletool/releases](https://github.com/google/bundletool/releases) and save it as `tools/bundletool.jar` at the project root. The jar needs Java 11+ on `PATH` (Android Studio's bundled `jbr/` works).
+**Option B — Linux (wrapper on `PATH`, recommended):** download `bundletool-all-<ver>.jar` from [github.com/google/bundletool/releases](https://github.com/google/bundletool/releases), then:
+
+```bash
+mkdir -p ~/tools ~/.local/bin
+mv ~/Downloads/bundletool-all-*.jar ~/tools/bundletool.jar
+cat > ~/.local/bin/bundletool <<'SH'
+#!/usr/bin/env bash
+exec java -jar "$HOME/tools/bundletool.jar" "$@"
+SH
+chmod +x ~/.local/bin/bundletool
+```
+
+Make sure `~/.local/bin` is on your `PATH` (it is after `pipx ensurepath`).
+
+**Option C — project folder:** save the jar as `tools/bundletool.jar` inside this project. `qa-tool` runs it with `java -jar` automatically. The jar is gitignored.
+
+Verify with `bundletool version` (options A/B).
 
 APKs built from an `.aab` are signed with the Android debug keystore at `~/.android/debug.keystore`. Android Studio creates it the first time you build a project. If it's missing, create it with:
 
@@ -77,6 +96,10 @@ keytool -genkeypair -v -keystore ~/.android/debug.keystore \
   -keyalg RSA -keysize 2048 -validity 10000 \
   -dname "CN=Android Debug,O=Android,C=US"
 ```
+
+### aapt2 (recommended, ships with Android Studio)
+
+`qa-tool apk install` reads each build's package name (staging `com.holafly.holafly.dev` vs RC `com.holafly.holafly`) so it uninstalls the right app first. For `.apk` files it uses `aapt2`, which comes with the Android SDK build-tools (`~/Android/Sdk/build-tools/<version>/aapt2`). The tool finds it there automatically. If you have no build-tools installed, add them in Android Studio → SDK Manager → SDK Tools → **Android SDK Build-Tools**. Without `aapt2`, the tool assumes `com.holafly.holafly.dev`.
 
 ### pipx (recommended for tool install)
 
@@ -283,6 +306,39 @@ Drop `.apk` or `.aab` files from Codemagic into the `apks/` folder at the projec
 The package to uninstall first is read from the file itself: staging builds are `com.holafly.holafly.dev`, RC builds are `com.holafly.holafly`. Override with `--package`. In the GUI, the APK row shows INSTALLED if either package is on the emulator, and UNINSTALL removes both.
 
 The install target can be the emulator or a real phone connected over USB. If more than one device is connected, pass `--device/-s <serial>` or pick one from the interactive prompt.
+
+---
+
+### Installing a build on a real phone
+
+You can install `.apk` and `.aab` builds on a physical Android phone over USB. **Traffic is not intercepted on a phone** (see [Known Limitations](#known-limitations)), so this is for testing a build as-is. `qa-tool init` is not needed for phones.
+
+**One-time phone setup:**
+
+1. **Enable Developer options:** Settings → About phone → tap **Build number** 7 times.
+2. **Enable USB debugging:** Settings → System → Developer options → **USB debugging**. On Xiaomi/MIUI, also enable **Install via USB**.
+3. **Plug the phone in** and tap **Allow** on the "Allow USB debugging?" prompt. Tick "Always allow from this computer".
+4. **Check it is visible:**
+
+   ```bash
+   adb devices
+   ```
+
+   The phone should be listed with the state `device`. If it shows `unauthorized`, unlock the phone and accept the prompt. If it isn't listed at all, try a different cable (some are charge-only) or USB port.
+
+**Every install:**
+
+```bash
+# Only the phone connected → installs straight to it
+qa-tool apk install
+
+# Phone + emulator connected → you get a "which device?" picker, or name it:
+qa-tool apk install -s <serial-from-adb-devices>
+```
+
+The GUI always installs to the emulator, so use the CLI for phones.
+
+> ⚠️ **Don't use your personal phone for RC builds.** The RC `.aab` uses the same package as the Play Store app (`com.holafly.holafly`), and its signature is different. The tool has to **uninstall the existing Holafly app first**, which removes its login and app data. eSIM profiles already installed on the phone stay, because they belong to Android, not the app. `--keep` doesn't help: the install would fail with a signature error. Use a dedicated test phone.
 
 ---
 
@@ -513,6 +569,21 @@ User-facing files you interact with directly:
 
 ---
 
+## Troubleshooting installs
+
+| Message | What to do |
+|---------|------------|
+| `No device connected.` | Start the emulator (`qa-tool emulator start`) or plug in a phone and accept the USB debugging prompt. Check with `adb devices`. |
+| `Device '<serial>' is not connected.` | The `-s` serial is wrong. Copy it from the `Connected:` list or from `adb devices`. |
+| `bundletool not found.` | Install bundletool (see [Prerequisites](#bundletool-only-needed-for-aab-builds)). |
+| `java not found on PATH.` | Install Java 11+ (`java -version` to check). |
+| `Debug keystore not found` | Run the `keytool` command it prints (also in [Prerequisites](#bundletool-only-needed-for-aab-builds)). |
+| `Installed app has a different signature. Uninstall it first` | You used `--keep`, or clicked INSTALL in the GUI without uninstalling first. Run without `--keep`, or click UNINSTALL in the GUI, then install again. |
+| `more than one device` | Pass `-s <serial>` to `apk install`. For `cert install` and `emulator wipe-app`, unplug the phone. |
+| GUI APK row shows NOT INSTALLED after an install | Restart the GUI. If it persists, check `adb shell pm list packages com.holafly`. A build with a package other than `com.holafly.holafly(.dev)` isn't recognised by the GUI. |
+
+---
+
 ## Known Limitations
 
 **Adyen payments require `--no-proxy`**
@@ -528,7 +599,7 @@ A factory reset removes the CA certificate. Run `qa-tool cert install` again aft
 `rules/injection_rules.toml` is resolved relative to the package source via `__file__`. This works for editable installs (`pipx install --editable .`). It will break if the package is installed into a site-packages directory without the project root present (e.g. a future PyPI release). This is a known issue not yet addressed.
 
 **Real devices are install-only**
-A phone has no QEMU `-http-proxy` and no system cert, so its traffic is not intercepted. Interception requires the emulator.
+A phone has no QEMU `-http-proxy` and no system cert, so its traffic is not intercepted. Interception requires the emulator. See [Installing a build on a real phone](#installing-a-build-on-a-real-phone).
 
 **AAB installs are debug-signed**
 APKs generated from an `.aab` are signed with the debug key, which differs from Codemagic-signed APKs. The existing app must be uninstalled first — the CLI does this by default; in the GUI, click **UNINSTALL** first. Google Sign-In / Firebase flows that check the app's SHA-1 need the debug key's SHA-1 registered.
