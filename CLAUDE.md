@@ -15,7 +15,7 @@ The core tool is functional. A QA engineer can:
 3. `qa-tool mitmweb start/stop` — runs mitmproxy in the background with Adyen cert-pinning bypass (`--set ignore_hosts=".*adyen.*"`)
 4. `qa-tool emulator start/stop/wipe-app/wipe-data` — runs the Android emulator with critical flags (`-http-proxy` at QEMU level, `-writable-system`, `-gpu host`). Has `--no-proxy` flag for testing Adyen payments that conflict with interception.
 5. `qa-tool cert install` — pushes mitmproxy CA cert to `/system/etc/security/cacerts/` with remount-reboot handling
-6. `qa-tool apk install` — installs APK from `apks/` folder, handles multi-APK selection via interactive picker
+6. `qa-tool apk install` — installs `.apk` or `.aab` (via bundletool) from `apks/` on the emulator or a USB device. Handles multi-file selection and multi-device selection (`--device/-s` or picker)
 7. `qa-tool inject list/start/stop/status/add/remove` — manage failure injection rules
 8. `qa-tool gui` — Textual TUI that wraps everything, retro neon arcade aesthetic
 
@@ -27,7 +27,8 @@ GUI features:
 - APK version label below APK row — shows installed `versionName` from device + available APK filename
 - CERT and APK status checks query the running emulator via adb (not just local file existence)
 - Injection rule rows toggle START ↔ STOP with green active marker
-- APK picker modal for multi-APK selection (Textual ModalScreen + ListView)
+- APK picker modal for multi-file selection (Textual ModalScreen + ListView) — lists `.apk` and `.aab` files
+- GUI installs/uninstalls target the emulator serial explicitly (`find_emulator_serial()`), so they keep working with a phone plugged in
 - Throttle preset row with clickable buttons (FULL, LTE, HSDPA, UMTS, EDGE, GSM) — cyan = active
 - All long-running actions use `@work(thread=True)` so UI never freezes
 
@@ -38,6 +39,7 @@ GUI features:
 ├── README.md
 ├── pyproject.toml                    # Package: holafly-qa, command: qa-tool
 ├── apks/                             # Drop Codemagic APKs here (visible, project root)
+├── tools/                            # optional bundletool.jar (gitignored)
 ├── rules/                            # Injection rules (visible, project root)
 │   └── injection_rules.toml          # THE editable rules file
 ├── src/
@@ -53,7 +55,8 @@ GUI features:
 │       │   ├── mitmweb.py            # start/stop/is_running, _collect_addon_scripts (injection + throttle)
 │       │   ├── emulator.py           # start/stop/wait_for_boot/wipe_app/wipe_data
 │       │   ├── cert.py               # install_cert orchestrator, CertError
-│       │   ├── apk.py                # find_apks, pick_apk, install_apk, uninstall_app, ApkError
+│       │   ├── apk.py                # find_apks, pick_apk, install_apk, uninstall_app, list_devices, find_emulator_serial, install_app, ApkError
+│       │   ├── bundletool.py         # get_bundletool_cmd, build_apks, install_apks, install_aab, BundletoolError
 │       │   ├── injection.py          # InjectionRule, glob_to_regex, load/save rules, render_script, start/stop injection, add_rule, remove_rule, get_rule
 │       │   └── throttle.py           # THROTTLE_PRESETS, render_throttle_script, get_active_throttle, set_throttle, clear_throttle
 │       ├── commands/                  # THIN CLI WRAPPERS — parse args, call services, print output
@@ -97,8 +100,10 @@ When adding a new feature: write the service function FIRST, then add the CLI wr
 | `~/.holafly-qa/emulator.log` | emulator stdout/stderr | Debug only |
 | `~/.holafly-qa/cert_hash.txt` | Cached cert subject hash | Never edited |
 | `~/.holafly-qa/<hash>.0` | Cached hashed cert file for push | Never edited |
+| `~/.holafly-qa/apks_cache/` | bundletool-generated `.apks` archives | Never edited |
 | `<project-root>/apks/` | APK files for install | **User drops files here** |
 | `<project-root>/rules/injection_rules.toml` | Injection rules | **User edits this freely** |
+| `<project-root>/tools/bundletool.jar` | Optional bundletool jar | **User drops the jar here** |
 
 The split is intentional: ephemeral runtime state in the hidden home dir, user-facing editable data in the visible project root.
 
@@ -226,9 +231,20 @@ These came from hours of debugging. Do not re-discover them.
 - **APK folder lives at project root:** `<project-root>/apks/`
 - **Path resolved via `__file__`:** same pattern as rules folder
 - **Multi-APK handling:** if 1 APK exists, auto-install. If multiple, show picker (questionary for CLI, Textual ModalScreen for GUI). If 0, error.
-- **APK state check in GUI:** queries `adb shell pm list packages <name>` to determine if app is installed on device
 - **APK version label:** `_get_installed_version()` in `app.py` runs `adb shell dumpsys package <pkg>` and parses `versionName=` line. `get_apk_display_info()` combines this with the available APK filename for the label below the APK row.
-- **Default package name:** `com.holafly.holafly.dev`
+- **Two package names:** staging builds are `com.holafly.holafly.dev`, RC/production builds (e.g. the `.aab`) are `com.holafly.holafly`. Both live in `HOLAFLY_PACKAGES` in `services/apk.py`; `DEFAULT_PACKAGE` is the `.dev` one.
+- **Package detection:** `get_package_name(path)` reads the package from the file (`aapt2 dump packagename` for `.apk` — found on PATH or in the newest `$ANDROID_HOME/build-tools/*/`; `bundletool dump manifest` for `.aab`). CLI `apk install` uses it to pick what to uninstall first, falling back to `DEFAULT_PACKAGE`.
+- **GUI APK state** uses `list_installed_holafly_packages()` — INSTALLED if any Holafly package is present; the version label names each installed package; UNINSTALL removes all of them.
+- **Multi-device:** `_adb(serial)` returns `["adb", "-s", serial]` or `["adb"]`. `list_devices()` parses `adb devices` and returns only serials in the `device` state (skips `unauthorized`/`offline`). `find_emulator_serial()` returns the first `emulator-*` serial.
+- **Only install/uninstall paths are serial-aware.** Cert install, emulator wipe-app, and GUI status checks still use bare `adb` and assume a single device.
+
+### AAB / bundletool
+- **adb can't install `.aab`.** bundletool runs `build-apks --connected-device`, then `install-apks`.
+- **Always sign explicitly** with `~/.android/debug.keystore` (`android` / `androiddebugkey` / `android`). If missing, error with the `keytool` command to create it.
+- **Debug-signed installs conflict with Codemagic-signed ones** (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`) — uninstall first.
+- **Always pass `--adb=<path>`.** bundletool otherwise needs `ANDROID_HOME`, which we don't require.
+- **bundletool lookup order:** `bundletool` on PATH, then `<project-root>/tools/bundletool.jar` via `java -jar` (Java 11+).
+- **`BundletoolError` subclasses `ApkError`.** `apk.install_app` dispatches on file suffix and imports bundletool locally to avoid a circular import.
 
 ### Process Management
 - Every background process (mitmweb, emulator) spawned with `subprocess.Popen(..., start_new_session=True, stdin=DEVNULL, stdout=log_file, stderr=STDOUT)`
@@ -266,6 +282,8 @@ These were explicitly scoped out by the user:
 - **API 34+ APEX conscrypt support** — not needed based on current testing.
 - **Unit tests** — user explicitly declined. Manual end-to-end testing is the workflow.
 - **Git integration** — no repo set up yet. User will add when company repo is available.
+- **Doctor check for bundletool/java** — deliberately omitted so APK-only users don't see a red doctor.
+- **Serial support for non-install adb calls** — cert, emulator, and GUI status checks still assume a single device.
 
 ## Current Tasks for Claude Code
 

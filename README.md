@@ -58,6 +58,26 @@ openssl version
 
 On Ubuntu: `sudo apt install openssl`
 
+### bundletool (only needed for .aab builds)
+
+`adb` can't install an Android App Bundle (`.aab`) directly. The tool uses Google's [bundletool](https://github.com/google/bundletool) to convert it into device-specific APKs. Install it one of two ways:
+
+```bash
+# Option A: Homebrew
+brew install bundletool
+```
+
+Option B: download `bundletool-all-<ver>.jar` from [github.com/google/bundletool/releases](https://github.com/google/bundletool/releases) and save it as `tools/bundletool.jar` at the project root. The jar needs Java 11+ on `PATH` (Android Studio's bundled `jbr/` works).
+
+APKs built from an `.aab` are signed with the Android debug keystore at `~/.android/debug.keystore`. Android Studio creates it the first time you build a project. If it's missing, create it with:
+
+```bash
+keytool -genkeypair -v -keystore ~/.android/debug.keystore \
+  -storepass android -alias androiddebugkey -keypass android \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -dname "CN=Android Debug,O=Android,C=US"
+```
+
 ### pipx (recommended for tool install)
 
 ```bash
@@ -115,7 +135,7 @@ qa-tool emulator start
 #    (takes 2-3 minutes — includes a remount + reboot cycle)
 qa-tool cert install
 
-# 6. Drop an APK into the apks/ folder at the project root, then install it
+# 6. Drop an .apk or .aab into the apks/ folder at the project root, then install it
 qa-tool apk install
 
 # 7. Or launch the TUI and do everything from one screen
@@ -237,7 +257,7 @@ Requires the emulator to be running. Takes 2-3 minutes due to a `adb remount` + 
 
 | Command | Description |
 |---------|-------------|
-| `qa-tool apk install` | Install an APK from the `apks/` folder |
+| `qa-tool apk install` | Install an APK or AAB from the `apks/` folder |
 
 ```bash
 # Auto-discover from the apks/ folder
@@ -246,11 +266,23 @@ qa-tool apk install
 # Install a specific file
 qa-tool apk install --path ~/Downloads/holafly-1.2.3.apk
 
+# Install an Android App Bundle
+qa-tool apk install --path apks/app-release.aab
+
+# Install on a specific device (serial from `adb devices`)
+qa-tool apk install -s <serial>
+
 # Install without removing the previous version first
 qa-tool apk install --keep
 ```
 
-Drop APK files from Codemagic into the `apks/` folder at the project root. If there is exactly one APK, it installs automatically. If there are multiple, an interactive picker appears.
+Drop `.apk` or `.aab` files from Codemagic into the `apks/` folder at the project root. If there is exactly one file, it installs automatically. If there are multiple, an interactive picker appears.
+
+`.aab` files are converted with bundletool into device-specific APKs signed with the debug keystore (see [Prerequisites](#bundletool-only-needed-for-aab-builds)). The generated `.apks` archive is cached in `~/.holafly-qa/apks_cache/`.
+
+The package to uninstall first is read from the file itself: staging builds are `com.holafly.holafly.dev`, RC builds are `com.holafly.holafly`. Override with `--package`. In the GUI, the APK row shows INSTALLED if either package is on the emulator, and UNINSTALL removes both.
+
+The install target can be the emulator or a real phone connected over USB. If more than one device is connected, pass `--device/-s <serial>` or pick one from the interactive prompt.
 
 ---
 
@@ -348,7 +380,7 @@ The GUI (`qa-tool gui`) is a retro neon arcade interface built with [Textual](ht
 | **MITMWEB** | START / STOP | Status pill turns green when running. |
 | **EMULATOR** | PROXY ON/NO PROXY toggle · START / STOP / WIPE APP / WIPE DATA | Toggle is cyan when proxy is on, yellow when bypassed. WIPE DATA asks for confirmation. |
 | **CERT** | INSTALL | Grayed out when emulator is not running. Queries the device via `adb` to verify the cert is actually present (not just a local file check). |
-| **APK** | INSTALL / UNINSTALL | Toggles based on whether the package is detected on the device. Opens a picker modal when multiple APKs are in `apks/`. |
+| **APK** | INSTALL / UNINSTALL | Toggles based on whether the package is detected on the device. Opens a picker modal when multiple `.apk`/`.aab` files are in `apks/`. GUI installs always target the emulator, even if a phone is also connected. |
 
 **Button color conventions:**
 
@@ -469,6 +501,7 @@ The tool stores ephemeral state in `~/.holafly-qa/`. You should never need to ed
 | `current_injection.py` | Auto-generated mitmproxy addon script |
 | `mitmweb.log` | mitmweb stdout/stderr |
 | `emulator.log` | Emulator stdout/stderr |
+| `apks_cache/` | bundletool-generated `.apks` archives |
 
 User-facing files you interact with directly:
 
@@ -476,6 +509,7 @@ User-facing files you interact with directly:
 |------|---------|
 | `apks/` | Drop Codemagic APK builds here |
 | `rules/injection_rules.toml` | Add and edit injection rules here |
+| `tools/bundletool.jar` | Optional bundletool jar (if not installed via Homebrew) |
 
 ---
 
@@ -492,6 +526,15 @@ A factory reset removes the CA certificate. Run `qa-tool cert install` again aft
 
 **Injection rules path is dev-install only**
 `rules/injection_rules.toml` is resolved relative to the package source via `__file__`. This works for editable installs (`pipx install --editable .`). It will break if the package is installed into a site-packages directory without the project root present (e.g. a future PyPI release). This is a known issue not yet addressed.
+
+**Real devices are install-only**
+A phone has no QEMU `-http-proxy` and no system cert, so its traffic is not intercepted. Interception requires the emulator.
+
+**AAB installs are debug-signed**
+APKs generated from an `.aab` are signed with the debug key, which differs from Codemagic-signed APKs. The existing app must be uninstalled first — the CLI does this by default; in the GUI, click **UNINSTALL** first. Google Sign-In / Firebase flows that check the app's SHA-1 need the debug key's SHA-1 registered.
+
+**Other adb commands assume a single device**
+`cert install`, `emulator wipe-app`, and the GUI cert/APK status checks still use bare `adb`. Unplug the phone while using them with the emulator.
 
 **No cert uninstall command**
 There is no `cert uninstall`. To remove the certificate, use `emulator wipe-data` to factory reset the device.

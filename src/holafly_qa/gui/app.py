@@ -9,7 +9,13 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, Static
 
-from holafly_qa.services.apk import find_apks_in_dir, install_apk, pick_apk, uninstall_app
+from holafly_qa.services.apk import (
+    find_apks_in_dir,
+    find_emulator_serial,
+    install_app,
+    list_installed_holafly_packages,
+    uninstall_app,
+)
 from holafly_qa.services.cert import CertError, MITM_CERT_PATH, install_cert
 from holafly_qa.services.config import load_config
 from holafly_qa.services.emulator import (
@@ -38,7 +44,6 @@ from holafly_qa.services.throttle import (
 )
 
 
-HOLAFLY_PACKAGE = "com.holafly.holafly.dev"
 
 
 def get_mitmweb_state() -> str:
@@ -87,21 +92,8 @@ def _is_cert_on_device() -> bool:
 
 
 def _is_apk_on_device() -> bool:
-    """Check if the Holafly package is installed on the running emulator."""
-    try:
-        result = subprocess.run(
-            ["adb", "shell", "pm", "list", "packages", HOLAFLY_PACKAGE],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
-
-    if result.returncode != 0:
-        return False
-
-    return f"package:{HOLAFLY_PACKAGE}" in result.stdout
+    """Check if any Holafly package (staging or RC) is on the emulator."""
+    return bool(list_installed_holafly_packages())
 
 
 def get_cert_state() -> str:
@@ -122,11 +114,11 @@ def get_apk_state() -> str:
     return "NOT INSTALLED"
 
 
-def _get_installed_version() -> str | None:
+def _get_installed_version(package: str) -> str | None:
     """Query the installed app versionName from adb."""
     try:
         result = subprocess.run(
-            ["adb", "shell", "dumpsys", "package", HOLAFLY_PACKAGE],
+            ["adb", "shell", "dumpsys", "package", package],
             capture_output=True,
             text=True,
             timeout=5,
@@ -147,9 +139,13 @@ def get_apk_display_info() -> str:
     """Return a version/filename string for display below the APK row."""
     apks = find_apks_in_dir()
 
-    if is_emulator_running() and _is_apk_on_device():
-        version = _get_installed_version()
-        installed = f"installed: v{version}" if version else "installed"
+    packages = list_installed_holafly_packages() if is_emulator_running() else []
+    if packages:
+        parts = []
+        for package in packages:
+            version = _get_installed_version(package)
+            parts.append(f"v{version} ({package})" if version else package)
+        installed = "installed: " + ", ".join(parts)
         file_part = f"  |  file: {apks[-1].name}" if apks else ""
         return installed + file_part
     elif apks:
@@ -822,7 +818,7 @@ class HolaflyQAApp(App):
 
         if not apks:
             self.call_from_thread(
-                self.add_log, "✗ No APKs found in apks/ folder"
+                self.add_log, "✗ No .apk/.aab files found in apks/ folder"
             )
             return
 
@@ -850,14 +846,17 @@ class HolaflyQAApp(App):
 
     def _install_apk_path(self, apk_path) -> None:
         """Shared install logic used by both single-apk and picker paths."""
-        self.call_from_thread(
-            self.add_log, f"Installing {apk_path.name}..."
-        )
+        serial = find_emulator_serial()
+        if apk_path.suffix == ".aab":
+            message = f"Building APKs from {apk_path.name} via bundletool..."
+        else:
+            message = f"Installing {apk_path.name}..."
+        self.call_from_thread(self.add_log, message)
         try:
-            install_apk(apk_path)
-            self.call_from_thread(self.add_log, "✓ APK installed")
+            install_app(apk_path, serial=serial)
+            self.call_from_thread(self.add_log, "✓ App installed")
         except Exception as e:
-            self.call_from_thread(self.add_log, f"✗ APK install failed: {e}")
+            self.call_from_thread(self.add_log, f"✗ Install failed: {e}")
         self.call_from_thread(self.refresh_all)
 
     @work(thread=True, exclusive=True)
@@ -867,17 +866,17 @@ class HolaflyQAApp(App):
                 self.add_log, "✗ Emulator must be running to uninstall APK"
             )
             return
-        self.call_from_thread(
-            self.add_log, f"Uninstalling {HOLAFLY_PACKAGE}..."
-        )
+        serial = find_emulator_serial()
+        packages = list_installed_holafly_packages(serial)
+        if not packages:
+            self.call_from_thread(
+                self.add_log, "App was not installed (nothing to do)"
+            )
         try:
-            was_installed = uninstall_app(HOLAFLY_PACKAGE)
-            if was_installed:
-                self.call_from_thread(self.add_log, "✓ APK uninstalled")
-            else:
-                self.call_from_thread(
-                    self.add_log, "App was not installed (nothing to do)"
-                )
+            for package in packages:
+                self.call_from_thread(self.add_log, f"Uninstalling {package}...")
+                uninstall_app(package, serial=serial)
+                self.call_from_thread(self.add_log, f"✓ {package} uninstalled")
         except Exception as e:
             self.call_from_thread(self.add_log, f"✗ Uninstall failed: {e}")
         self.call_from_thread(self.refresh_all)

@@ -19,7 +19,12 @@ build/
 
 # APKs (large binaries, don't commit)
 apks/*.apk
+apks/*.aab
+
+# bundletool jar (download separately)
+tools/*.jar
 
 # Keep folders but not contents
 !apks/.gitkeep
 !rules/.gitkeep
+!tools/.gitkeep
